@@ -26,11 +26,12 @@ def _parse_two_operand(line, sep):
     return components
 
 def _process_vars_in_literal(literal):
-    predefined_replaces = {"$$PWD" : os.getcwd()}
+    predefined_replaces = {"$$PWD"   : "${CMAKE_CURRENT_LIST_DIR}",
+                           "$${PWD}" : "${CMAKE_CURRENT_LIST_DIR}"}
     for src in predefined_replaces.iterkeys():
         literal = literal.replace(src, predefined_replaces[src])
 
-    return literal.replace("$${", "${") # CMake variable useage syntax
+    return literal.replace("$${", "${") # CMake variable usage syntax
 
 ########################################################################################################################
 # statements
@@ -96,6 +97,7 @@ class StatementAssignment:
         try:
             self.var, self.val = _parse_two_operand(line, " = ")
             self._process_special_target()
+            self._process_special_subdirs_template()
             self.val = _process_vars_in_literal(self.val)
             if ":" in self.var:
                 platform, var = self.var.split(':')
@@ -113,11 +115,26 @@ class StatementAssignment:
     def _process_special_target(self):
         if self.var == "TARGET":
             self.special = "project(" + self.val + ")"
-            report_info("detected project name: " + self.val)
+            report_info("detected project (taget) name: " + self.val)
+
+    def _process_special_subdirs_template(self):
+        if self.var == "TEMPLATE":
+            if self.val == "subdirs":
+                report_info("multiple project template SUBDIRS")
+            else:
+                report_error("unknown template encountered")
+            self.special = "# parsed subdirs template"
+        if self.var == "SUBDIRS":
+            for subdir in self.val.split():
+                subdir_project = subdir + "/" + subdir + ".pro"
+                report_info("parsing subdir project " + subdir_project)
+            	QMakeParser(subdir_project).iter_statements()
+
 
 class StatementConcatenation:
     def __init__(self, line):
         self.special = None
+        self.needs_quotes = False
         self.parse(line)
 
     def parse(self, line):
@@ -132,7 +149,10 @@ class StatementConcatenation:
     def cmake_code(self):
         if self.special is not None:
             return self.special
-        return "set(" + self.var + r" ${" + self.var + "} " + self.val + ")"
+        if self.needs_quotes:
+            return "set(" + self.var + " \"" + r"${" + self.var + "} " + self.val + "\")"
+        else:
+            return "set(" + self.var + r" ${" + self.var + "} " + self.val + ")"
 
     def _process_special(self):
         self._process_special_qt()
@@ -150,8 +170,14 @@ class StatementConcatenation:
             self.special = ""
             qt_libraries = ""
             for qt_component in self.val.split():
-                self.special += "find_package(Qt5" + qt_component.strip().title() + " REQUIRED)\n"
-                qt_libraries += "Qt5::" + qt_component.strip().title() + " "
+                cmake_modules = {"multimediawidgets": "MultimediaWidgets"}
+                qt_component_cmake = qt_component.strip().title()
+                try:
+                    qt_component_cmake = cmake_modules[qt_component]
+                except KeyError:
+                    pass    
+                self.special += "find_package(Qt5" + qt_component_cmake + " REQUIRED)\n"
+                qt_libraries += "Qt5::" + qt_component_cmake + " "
             self.special +=  StatementConcatenation("LIBS += " + qt_libraries.strip()).cmake_code() + "\n"
 
     def _process_special_includes(self):
@@ -161,10 +187,9 @@ class StatementConcatenation:
     def _process_mappings(self):
         if self.var == "QMAKE_CXXFLAGS":
             self.var = "CMAKE_CXX_FLAGS"
-            self.val = "\"" + self.val + "\""
-
+            self.needs_quotes = True
         if self.var == "QMAKE_LFLAGS":
-            self.val = "\"" + self.val + "\""
+            self.needs_quotes = True
 
     def _process_config(self):
         if self.var == "CONFIG":
@@ -178,7 +203,7 @@ class StatementConcatenation:
 class StatementFunction:
     def __init__(self, line):
         self.line = line
-        self.functions = {"message": self._message, "greaterThan": self._greaterThan, "system": self._message}
+        self.functions = {"message": self._message, "greaterThan": self._greaterThan, "system": self._system}
 
     def cmake_code(self):
         left_bracket_pos = self.line.index('(')
@@ -212,20 +237,25 @@ class QMakeConfigProcessor:
         if option_name == "thread":
             report_warning("threads support is UNIX only")
             return StatementConcatenation("LIBS += -lpthread")
-        report_warning("unsupported qmake config option " + option_name)
+        if option_name == "c++11":
+            return StatementConcatenation("QMAKE_CXXFLAGS += -std=c++11")
 
-        if "debug" in option_name or "release" in option_name:
+        if "debug" in option_name or "release" in option_name or option_name == "qt":
             # ignoring this as it is not useful in CMake
-            pass
+            return
 
         if option_name == "precompile_header":
             report_warning("CMake doesn't support precompiled headers")
+            return
+
+        report_warning("unsupported qmake config option " + option_name)
 
 
 class QMakeParser:
     def __init__(self, input_file_name):
         self.input_file_name = input_file_name
         self.current_line_num = 0
+        self._target_name = None
 
     def iter_statements(self):
         for line in self._iter_lines():
@@ -276,11 +306,11 @@ class QMakeParser:
     def _report_on_line(self, message):
         return self.input_file_name + ":" + str(self.current_line_num) + " " + message
 
-
 class Qmake2CmakeConverter:
     def __init__(self, qmake_file_name, cmake_file_name):
         self.qmake_file_name = qmake_file_name
         self.cmake_file_name = cmake_file_name
+        self.cotire = False
 
     def convert(self):
         with open(self.cmake_file_name, "w") as cmake_file:
@@ -299,6 +329,12 @@ class Qmake2CmakeConverter:
         statements.extend([StatementAssignment(var + " = \"\"") for var in predefined_variables])
         statements.append(StatementAssignment("PWD = \"" + os.getcwd() + "\""))
 
+        if self.qt_path is not None:
+            statements.append(StatementAssignment("CMAKE_PREFIX_PATH = \"" + self.qt_path + "\""))
+            report_info("Using QT path: " + self.qt_path)
+        else:
+            report_info("Using system QT installation")
+ 	
         for statement in statements:
             cmake_file.write(statement.cmake_code() + "\n")
 
@@ -310,12 +346,18 @@ class Qmake2CmakeConverter:
             "qt5_add_resources(RESOURCES_GENERATED ${RESOURCES})",
             "include_directories(${CMAKE_BUILD_FILES_DIRECTORY}) # fixes syntax analysis in CLion"
             "",
-            "set(TARGET ${CMAKE_PROJECT_NAME})",
+            "set(TARGET ${PROJECT_NAME})",
             "add_executable(${TARGET} ${SOURCES} ${UI_GENERATED_HEADERS} ${RESOURCES_GENERATED})",
-            "target_link_libraries(${TARGET} ${QMAKE_LFLAGS})\n"
+            "string(STRIP \"${QMAKE_LFLAGS}\" QMAKE_LFLAGS_STRIPPED)",
+            "target_link_libraries(${TARGET} ${QMAKE_LFLAGS_STRIPPED})\n"
             "target_link_libraries(${TARGET} ${LIBS})",
             ""
         ]])
+        if self.cotire:
+            cmake_file.writelines([
+                "set_target_properties(${TARGET} PROPERTIES COTIRE_CXX_PREFIX_HEADER_INIT \"../common_headers.h\")\n",
+                "cotire(${TARGET})\n"
+            ])
 
 ########################################################################################################################
 # entry point
@@ -324,12 +366,19 @@ output_cmake_file_name = "CMakeLists.txt"
 input_qmake_file_name  = "cloud.pro"
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--qt_path")
+parser.add_argument("--cotire")
+parser.add_argument("--system_include")
 parser.add_argument("input_file")
-parser.parse_args()
+parser = parser.parse_args()
 
 if parser.input_file != "":
     input_qmake_file_name = parser.input_file
 
 print "converting", input_qmake_file_name
-Qmake2CmakeConverter(input_qmake_file_name, output_cmake_file_name).convert()
+converter = Qmake2CmakeConverter(input_qmake_file_name, output_cmake_file_name)
+converter.qt_path = parser.qt_path
+converter.cotire = parser.cotire
+converter.convert()
 print "converted file saved to", output_cmake_file_name
+

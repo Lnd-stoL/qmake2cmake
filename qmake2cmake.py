@@ -7,13 +7,13 @@ import argparse
 # console reporting
 
 def report_info(msg):
-    print "(I) " + msg
+    print("(I) " + msg)
 
 def report_error(msg):
-    print "(X) " + msg
+    print("(X) " + msg)
 
 def report_warning(msg):
-    print "(!) " + msg
+    print("(!) " + msg)
 
 ########################################################################################################################
 # parsing utils
@@ -28,7 +28,7 @@ def _parse_two_operand(line, sep):
 def _process_vars_in_literal(literal):
     predefined_replaces = {"$$PWD"   : "${CMAKE_CURRENT_LIST_DIR}",
                            "$${PWD}" : "${CMAKE_CURRENT_LIST_DIR}"}
-    for src in predefined_replaces.iterkeys():
+    for src in predefined_replaces:
         literal = literal.replace(src, predefined_replaces[src])
 
     return literal.replace("$${", "${") # CMake variable usage syntax
@@ -128,7 +128,7 @@ class StatementAssignment:
             for subdir in self.val.split():
                 subdir_project = subdir + "/" + subdir + ".pro"
                 report_info("parsing subdir project " + subdir_project)
-            	QMakeParser(subdir_project).iter_statements()
+                QMakeParser(subdir_project).iter_statements()
 
 
 class StatementConcatenation:
@@ -334,7 +334,7 @@ class Qmake2CmakeConverter:
             report_info("Using QT path: " + self.qt_path)
         else:
             report_info("Using system QT installation")
- 	
+    
         for statement in statements:
             cmake_file.write(statement.cmake_code() + "\n")
 
@@ -375,10 +375,11 @@ parser = parser.parse_args()
 if parser.input_file != "":
     input_qmake_file_name = parser.input_file
 
-print "converting", input_qmake_file_name
+print("converting", input_qmake_file_name)
 converter = Qmake2CmakeConverter(input_qmake_file_name, output_cmake_file_name)
 converter.qt_path = parser.qt_path
 converter.cotire = parser.cotire
 converter.convert()
-print "converted file saved to", output_cmake_file_name
+print("converted file saved to", output_cmake_file_name)
+
 
